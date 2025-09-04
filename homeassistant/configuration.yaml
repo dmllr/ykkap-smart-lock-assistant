@@ -1,0 +1,29 @@
+# MQTT Integration for the Smart Door Lock
+mqtt:
+  lock:
+    - name: "Smart Door Lock"
+      # A unique_id allows the entity to be managed from the Home Assistant UI.
+      unique_id: smart_door_lock_mqtt
+      # The topic where the lock's state (LOCKED/UNLOCKED) is published.
+      state_topic: "home/doorlock/state"
+      # The topic to send lock/unlock commands to.
+      command_topic: "home/doorlock/set"
+      # The payload sent to command_topic to lock the door.
+      payload_lock: "LOCK"
+      # The payload sent to command_topic to unlock the door.
+      payload_unlock: "UNLOCK"
+      # The expected payload from state_topic representing the 'locked' state.
+      state_locked: "LOCKED"
+      # The expected payload from state_topic representing the 'unlocked' state.
+      state_unlocked: "UNLOCKED"
+      # The state is not assumed after sending a command; we wait for a state update.
+      optimistic: false
+      # Quality of Service level for reliability. 1 = at least once.
+      qos: 1
+      # The broker will NOT retain the last state message for new subscribers.
+      retain: false
+      # Availability topics to mark the lock as online/offline.
+      availability:
+        - topic: "home/doorlock/availability"
+      payload_available: "online"
+      payload_not_available: "offline"
