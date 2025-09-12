@@ -19,6 +19,7 @@ import com.ykkap.lockbridge.http.WebServerManager
 import com.ykkap.lockbridge.mqtt.MqttManager
 import com.ykkap.lockbridge.viewmodel.ServiceState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -56,10 +57,28 @@ class LockBridgeService : LifecycleService() {
     private val _lockStatus = MutableStateFlow("Unknown")
     val lockStatus: StateFlow<String> = _lockStatus.asStateFlow()
 
+    private val _lastStatusUpdateTime = MutableStateFlow<Long?>(null)
+    val lastStatusUpdateTime: StateFlow<Long?> = _lastStatusUpdateTime.asStateFlow()
+
     private val _desiredLockState = MutableStateFlow<String?>(null)
+    private val manualUpdateRequest = MutableSharedFlow<Unit>(
+      extraBufferCapacity = 1,
+      onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     fun updateLockStatus(status: String) {
       _lockStatus.value = status
+      if (status == "LOCKED" || status == "UNLOCKED") {
+        _lastStatusUpdateTime.value = System.currentTimeMillis()
+      }
+    }
+
+    // This function provides a clean, thread-safe way for external components like the
+    // ViewModel to request a status update without needing a direct service instance.
+    fun requestManualUpdate() {
+      // tryEmit is used here to avoid suspending if there's no collector,
+      // making it safe to call from any context. The buffer ensures the event is not dropped.
+      manualUpdateRequest.tryEmit(Unit)
     }
   }
 
@@ -102,6 +121,14 @@ class LockBridgeService : LifecycleService() {
             }
           }
         }
+      }
+    }
+
+    // This collector listens for update requests from the UI (via the ViewModel).
+    lifecycleScope.launch {
+      manualUpdateRequest.collect {
+        Log.i(TAG, "Manual status update requested from UI.")
+        YkkAccessibilityService.requestStatusCheck()
       }
     }
 
