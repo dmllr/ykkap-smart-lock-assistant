@@ -47,3 +47,39 @@ mqtt:
       device:
         identifiers:
           - smart_door_lock_mqtt
+
+  sensor:
+    - name: "Door Lock Last Update"
+      unique_id: smart_door_lock_last_update
+      # This sensor listens to a dedicated topic for timestamp updates.
+      state_topic: "home/doorlock/last_updated"
+      # This tells Home Assistant to interpret the payload as a timestamp
+      # and display it as a relative time (e.g., "2 minutes ago").
+      device_class: timestamp
+      # This ensures the sensor appears on the same device page as the lock.
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
+
+    - name: "Door Lock Status"
+      unique_id: smart_door_lock_status
+      # This sensor subscribes to the same topic as the lock's state.
+      state_topic: "home/doorlock/state"
+      # It's linked to the same device for a clean UI.
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
+      # It uses the same availability topic to go offline with the lock.
+      availability:
+        - topic: "home/doorlock/availability"
+      payload_available: "online"
+      payload_not_available: "offline"
+      # This Jinja2 template dynamically changes the icon based on the state.
+      icon: >-
+        {% if value == 'LOCKED' %}
+          mdi:lock
+        {% elif value == 'UNLOCKED' %}
+          mdi:lock-open
+        {% else %}
+          mdi:lock-question
+        {% endif %}

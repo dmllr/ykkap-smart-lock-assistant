@@ -26,6 +26,9 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 class LockBridgeService : LifecycleService() {
 
@@ -54,8 +57,12 @@ class LockBridgeService : LifecycleService() {
     private val _webServerStatus = MutableStateFlow("Stopped")
     val webServerStatus: StateFlow<String> = _webServerStatus.asStateFlow()
 
-    private val _lockStatus = MutableStateFlow("Unknown")
-    val lockStatus: StateFlow<String> = _lockStatus.asStateFlow()
+    // Using a SharedFlow ensures that every update emission is processed by collectors,
+    // even if the new state is the same as the old one. This is crucial for refreshing
+    // the 'last_updated' timestamp in Home Assistant on every manual check.
+    // 'replay = 1' ensures new subscribers immediately get the last known status.
+    private val _lockStatus = MutableSharedFlow<String>(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val lockStatus: SharedFlow<String> = _lockStatus.asSharedFlow()
 
     private val _lastStatusUpdateTime = MutableStateFlow<Long?>(null)
     val lastStatusUpdateTime: StateFlow<Long?> = _lastStatusUpdateTime.asStateFlow()
@@ -66,8 +73,13 @@ class LockBridgeService : LifecycleService() {
       onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
+    init {
+      // Provide the initial state for the replay cache.
+      _lockStatus.tryEmit("Unknown")
+    }
+
     fun updateLockStatus(status: String) {
-      _lockStatus.value = status
+      _lockStatus.tryEmit(status)
       if (status == "LOCKED" || status == "UNLOCKED") {
         _lastStatusUpdateTime.value = System.currentTimeMillis()
       }
@@ -113,6 +125,13 @@ class LockBridgeService : LifecycleService() {
               // When the lock is accessible, report it as 'online' and publish its state.
               mqttManager.publish("home/doorlock/availability", "online")
               mqttManager.publish("home/doorlock/state", status.uppercase())
+
+              // Publish the current timestamp to the dedicated topic for HA.
+              // ISO 8601 format is required for the 'timestamp' device_class.
+              val timestamp = DateTimeFormatter.ISO_OFFSET_DATE_TIME
+                .withZone(ZoneOffset.UTC)
+                .format(Instant.now())
+              mqttManager.publish("home/doorlock/last_updated", timestamp)
             }
 
             "UNAVAILABLE" -> {
@@ -188,7 +207,7 @@ class LockBridgeService : LifecycleService() {
       if (desiredState == null) return@collect
 
       for (attempt in 1..OPERATION_RETRY_LIMIT) {
-        if (lockStatus.value.equals(desiredState, ignoreCase = true)) {
+        if (lockStatus.first().equals(desiredState, ignoreCase = true)) {
           Log.i(TAG, "Operation successful. Desired state '$desiredState' matches actual state.")
           _desiredLockState.value = null
           return@collect
@@ -196,7 +215,7 @@ class LockBridgeService : LifecycleService() {
 
         Log.i(
           TAG,
-          "Attempt $attempt/$OPERATION_RETRY_LIMIT: State mismatch. Desired: '$desiredState', Actual: '${lockStatus.value}'."
+          "Attempt $attempt/$OPERATION_RETRY_LIMIT: State mismatch. Desired: '$desiredState', Actual: '${lockStatus.first()}'."
         )
 
         val action = if (desiredState == "LOCKED") YkkAction.LOCK else YkkAction.UNLOCK
