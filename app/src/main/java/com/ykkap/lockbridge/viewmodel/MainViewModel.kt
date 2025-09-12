@@ -30,6 +30,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val mqttStatus: StateFlow<String> = LockBridgeService.mqttStatus
   val webServerStatus: StateFlow<String> = LockBridgeService.webServerStatus
   val lockStatus: StateFlow<String> = LockBridgeService.lockStatus
+  val lastStatusUpdateTime: StateFlow<Long?> = LockBridgeService.lastStatusUpdateTime
 
   fun saveAppSettings(settings: AppSettings) {
     viewModelScope.launch {

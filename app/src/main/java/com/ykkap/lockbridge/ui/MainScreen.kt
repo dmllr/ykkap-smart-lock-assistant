@@ -15,6 +15,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
@@ -26,11 +27,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import com.ykkap.lockbridge.service.LockBridgeService
 import com.ykkap.lockbridge.service.YkkAccessibilityService
 import com.ykkap.lockbridge.viewmodel.MainViewModel
 import com.ykkap.lockbridge.viewmodel.ServiceState
-import androidx.core.net.toUri
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @SuppressLint("BatteryLife")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,6 +47,7 @@ fun MainScreen(
   val mqttStatus by viewModel.mqttStatus.collectAsState()
   val webServerStatus by viewModel.webServerStatus.collectAsState()
   val lockStatus by viewModel.lockStatus.collectAsState()
+  val lastUpdateTime by viewModel.lastStatusUpdateTime.collectAsState()
 
   val context = LocalContext.current
   var isAccessibilityEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
@@ -143,7 +148,14 @@ fun MainScreen(
         )
       }
 
-      StatusCard(mqttStatus, webServerStatus, lockStatus)
+      StatusCard(
+        serviceState = serviceState,
+        mqttStatus = mqttStatus,
+        webServerStatus = webServerStatus,
+        lockStatus = lockStatus,
+        lastUpdateTime = lastUpdateTime,
+        onUpdateClick = { LockBridgeService.requestManualUpdate() }
+      )
     }
   }
 }
@@ -171,26 +183,63 @@ private fun ServiceControlSection(
 }
 
 @Composable
-private fun StatusCard(mqttStatus: String, webServerStatus: String, lockStatus: String) {
+private fun StatusCard(
+  serviceState: ServiceState,
+  mqttStatus: String,
+  webServerStatus: String,
+  lockStatus: String,
+  lastUpdateTime: Long?,
+  onUpdateClick: () -> Unit
+) {
   Card(modifier = Modifier.fillMaxWidth()) {
     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
       Text("Live Status", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp))
       StatusRow("MQTT Broker:", mqttStatus)
       StatusRow("Web Server:", webServerStatus)
-      StatusRow("Door Lock:", lockStatus)
+      StatusRow(
+        label = "Door Lock:", value = lockStatus
+      ) {
+        // This content is a trailing lambda, allowing us to place the refresh icon
+        // next to the status value for a more intuitive UI.
+        IconButton(
+          onClick = onUpdateClick,
+          modifier = Modifier.size(24.dp),
+          enabled = serviceState == ServiceState.RUNNING
+        ) {
+          Icon(
+            imageVector = Icons.Default.Refresh,
+            contentDescription = "Refresh Lock Status"
+          )
+        }
+      }
+      if (lastUpdateTime != null) {
+        val formattedTime = remember(lastUpdateTime) {
+          SimpleDateFormat("MMM d, hh:mm:ss a", Locale.getDefault()).format(Date(lastUpdateTime))
+        }
+        Text(
+          text = "Last update: $formattedTime",
+          style = MaterialTheme.typography.bodySmall,
+          modifier = Modifier
+            .align(Alignment.End)
+            .padding(top = 4.dp)
+        )
+      }
     }
   }
 }
 
 @Composable
-private fun StatusRow(label: String, value: String) {
+private fun StatusRow(label: String, value: String, trailingContent: @Composable () -> Unit = {}) {
   Row(
     modifier = Modifier.fillMaxWidth(),
     horizontalArrangement = Arrangement.SpaceBetween,
     verticalAlignment = Alignment.CenterVertically
   ) {
     Text(label, style = MaterialTheme.typography.bodyLarge)
-    Text(value, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text(value, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+      trailingContent()
+    }
   }
 }
 

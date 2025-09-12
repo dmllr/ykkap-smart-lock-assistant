@@ -178,7 +178,8 @@ class YkkAccessibilityService : AccessibilityService() {
       // --- Action-Specific Logic ---
 
       if (action == YkkAction.CHECK_STATUS) {
-        Log.i(TAG, "App is awake. Status check will be performed by the event listener.")
+        Log.i(TAG, "App is awake. Proactively checking status from the ready UI.")
+        checkStatus(readyRootNode)
         return true
       }
 

@@ -27,3 +27,23 @@ mqtt:
         - topic: "home/doorlock/availability"
       payload_available: "online"
       payload_not_available: "offline"
+      # This block links the lock to a device, allowing other entities (like a button)
+      # to be associated with it in the Home Assistant UI.
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
+        name: "Smart Door Lock"
+
+  button:
+    - name: "Update Door Lock Status"
+      unique_id: smart_door_lock_update_status
+      # This button publishes a message to the check_status topic.
+      command_topic: "home/doorlock/check_status"
+      # The payload can be anything; the app just listens for a message on the topic.
+      payload_press: "CHECK"
+      # This button does not retain its command.
+      retain: false
+      # Connects this button to the same device as the lock for a unified UI.
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
