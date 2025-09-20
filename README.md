@@ -26,35 +26,56 @@ This project provides a robust solution for controlling and monitoring your YKK 
 
 ## System Architecture
 
-The application is installed on a dedicated Android device placed near the lock. It runs a background service that listens for commands and interacts with the official YKK AP application.
+The application offers two primary modes of operation: a full integration with Home Assistant via MQTT, or a standalone mode using the local Web UI.
+
+#### Home Assistant Integration Flow
+
+This diagram shows how commands flow from Home Assistant to the physical lock.
 
 ```mermaid
 graph TD
-    subgraph Smart Home
-        HA[Home Assistant]
-        MQTT[MQTT Broker]
+    subgraph User
+        U_HA((User via HA))
     end
 
-    subgraph User Interfaces
-        U_HA((User via HA)) --> HA
-        U_WEB((User via Web Browser)) --> KTOR[Web Server]
+    subgraph Smart Home
+        HA[Home Assistant] <--> MQTT[MQTT Broker]
     end
 
     subgraph Android Bridge Device
-        LBS[Lock Bridge Service]
-        MQTT_MGR[MQTT Manager]
-        KTOR
-        AS[YkkAccessibilityService]
-        YKK[Official YKK App]
-
-        KTOR -- Command --> LBS
-        MQTT_MGR -- Command --> LBS
-        LBS -- Perform Action --> AS
-        AS -- Wakes Screen & Launches --> YKK
-        AS -- Clicks Buttons / Reads UI --> YKK
+        MQTT_MGR[MQTT Manager] --> LBS[Lock Bridge Service]
+        LBS -- Perform Action --> AS[YkkAccessibilityService]
+        AS -- Interacts with --> YKK[Official YKK App]
         YKK -- UI Update --> AS
         AS -- Reports Status --> LBS
         LBS -- Publish Status --> MQTT_MGR
+    end
+
+    subgraph Physical
+        LOCK((YKK AP Electric Lock))
+    end
+
+    U_HA --> HA
+    MQTT <--> MQTT_MGR
+    YKK <-->|Bluetooth| LOCK
+```
+
+#### Standalone Web UI Flow
+
+This diagram shows how the self-contained Web UI controls the lock without any external dependencies like MQTT or Home Assistant.
+
+```mermaid
+graph TD
+    subgraph User
+        U_WEB((User via Web Browser))
+    end
+
+    subgraph Android Bridge Device
+        KTOR[Web Server] --> LBS[Lock Bridge Service]
+        LBS -- Perform Action --> AS[YkkAccessibilityService]
+        AS -- Interacts with --> YKK[Official YKK App]
+        YKK -- UI Update --> AS
+        AS -- Reports Status --> LBS
         LBS -- Provide Status --> KTOR
     end
 
@@ -62,9 +83,7 @@ graph TD
         LOCK((YKK AP Electric Lock))
     end
 
-    HA <--> MQTT
-    MQTT <--> MQTT_MGR
-
+    U_WEB --> KTOR
     YKK <-->|Bluetooth| LOCK
 ```
 
@@ -72,8 +91,7 @@ graph TD
 
 1.  **Dedicated Android Device**: An Android phone or tablet (Android 8.0 Oreo / API 26 or newer) that can be left powered on and close to the door lock at all times.
 2.  **YKK AP App**: The official [スマートコントロールキー app](https://play.google.com/store/apps/details?id=com.alpha.lockapp) installed and paired with your door lock on the dedicated Android device.
-3.  **Home Assistant**: A running instance of Home Assistant.
-4.  **MQTT Broker**: A running MQTT broker accessible from the Android device.
+3.  **Home Assistant & MQTT Broker** (Optional): Required only if you want to integrate with Home Assistant.
 
 ## Installation and Configuration
 
@@ -92,85 +110,86 @@ graph TD
     *   **Battery Optimization Exemption**: Prevents the Android OS from putting the app to sleep to save power.
 3.  **Configure Integrations**:
     *   Navigate to **Settings** (top-right icon).
-    *   **Web Server**: Enable the web server for local network control. The port is configurable.
-    *   **Home Assistant via MQTT**: Enable this integration and enter your MQTT broker's URL, port, and credentials (if applicable).
+    *   Decide which integration(s) you want to use. You can enable one or both.
+    *   **Web Server**: Enable this for local network control via a browser. The port is configurable.
+    *   **Home Assistant via MQTT**: Enable this and enter your MQTT broker's URL, port, and credentials for Home Assistant integration.
     *   Click **Save**.
-4.  **Start the Service**: Return to the main screen and tap **"Start Service"**. The status indicators for MQTT, Web Server, and the Door Lock should update.
+4.  **Start the Service**: Return to the main screen and tap **"Start Service"**. The status indicators for your enabled integrations should update.
 
-### Step 3: Home Assistant Configuration
+### Step 3: Home Assistant Configuration (Optional)
 
-1.  **Add MQTT Configuration**: Add the following configuration to your `configuration.yaml` file in Home Assistant. This will create the lock entity, as well as several helpful sensors and a button for a complete integration.
+If you enabled the MQTT integration, add the following to your `configuration.yaml` file in Home Assistant.
 
-    ```yaml
-    # MQTT Integration for the Smart Door Lock
-    mqtt:
-      lock:
-        - name: "Smart Door Lock"
-          unique_id: smart_door_lock_mqtt
-          state_topic: "home/doorlock/state"
-          command_topic: "home/doorlock/set"
-          payload_lock: "LOCK"
-          payload_unlock: "UNLOCK"
-          state_locked: "LOCKED"
-          state_unlocked: "UNLOCKED"
-          optimistic: false
-          qos: 1
-          retain: false
-          availability:
-            - topic: "home/doorlock/availability"
-          payload_available: "online"
-          payload_not_available: "offline"
-          device:
-            identifiers:
-              - smart_door_lock_mqtt
-            name: "Smart Door Lock"
-            manufacturer: "YKK AP"
-            model: "Smart Control Key Bridge"
+```yaml
+# MQTT Integration for the Smart Door Lock
+mqtt:
+  lock:
+    - name: "Smart Door Lock"
+      unique_id: smart_door_lock_mqtt
+      state_topic: "home/doorlock/state"
+      command_topic: "home/doorlock/set"
+      payload_lock: "LOCK"
+      payload_unlock: "UNLOCK"
+      state_locked: "LOCKED"
+      state_unlocked: "UNLOCKED"
+      optimistic: false
+      qos: 1
+      retain: false
+      availability:
+        - topic: "home/doorlock/availability"
+      payload_available: "online"
+      payload_not_available: "offline"
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
+        name: "Smart Door Lock"
+        manufacturer: "YKK AP"
+        model: "Smart Control Key Bridge"
 
-      button:
-        - name: "Update Door Lock Status"
-          unique_id: smart_door_lock_update_status
-          command_topic: "home/doorlock/check_status"
-          payload_press: "CHECK"
-          retain: false
-          device:
-            identifiers:
-              - smart_door_lock_mqtt
+  button:
+    - name: "Update Door Lock Status"
+      unique_id: smart_door_lock_update_status
+      command_topic: "home/doorlock/check_status"
+      payload_press: "CHECK"
+      retain: false
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
 
-      sensor:
-        - name: "Door Lock Last Update"
-          unique_id: smart_door_lock_last_update
-          state_topic: "home/doorlock/last_updated"
-          device_class: timestamp
-          device:
-            identifiers:
-              - smart_door_lock_mqtt
+  sensor:
+    - name: "Door Lock Last Update"
+      unique_id: smart_door_lock_last_update
+      state_topic: "home/doorlock/last_updated"
+      device_class: timestamp
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
 
-        - name: "Door Lock Status"
-          unique_id: smart_door_lock_status
-          state_topic: "home/doorlock/state"
-          device:
-            identifiers:
-              - smart_door_lock_mqtt
-          availability:
-            - topic: "home/doorlock/availability"
-          payload_available: "online"
-          payload_not_available: "offline"
-          icon: >-
-            {% if value == 'LOCKED' %}
-              mdi:lock
-            {% elif value == 'UNLOCKED' %}
-              mdi:lock-open
-            {% else %}
-              mdi:lock-question
-            {% endif %}
-    ```
+    - name: "Door Lock Status"
+      unique_id: smart_door_lock_status
+      state_topic: "home/doorlock/state"
+      device:
+        identifiers:
+          - smart_door_lock_mqtt
+      availability:
+        - topic: "home/doorlock/availability"
+      payload_available: "online"
+      payload_not_available: "offline"
+      icon: >-
+        {% if value == 'LOCKED' %}
+          mdi:lock
+        {% elif value == 'UNLOCKED' %}
+          mdi:lock-open
+        {% else %}
+          mdi:lock-question
+        {% endif %}
+```
 
-2.  **Reload Home Assistant Configuration**: Reload your MQTT integration in Home Assistant (or restart the instance) to apply the changes. A new "Smart Door Lock" device with its associated entities should now be available.
+After adding the YAML, reload your MQTT integration in Home Assistant to see the new device and its entities.
 
-## Web Interface
+## Standalone Usage via Web UI
 
-Once the service is running with the Web Server enabled, you can access the control panel from any browser on your local network.
+If you do not use Home Assistant, you can still control your lock using the built-in Web UI. Simply enable the "Web Server" in the app's settings and leave the "Home Assistant via MQTT" integration disabled.
 
 **URL**: `http://<your-android-device-ip>:<port>`
 
@@ -178,6 +197,37 @@ The interface provides:
 -   **Lock** and **Unlock** buttons for direct control.
 -   A real-time **Status** display (`LOCKED`, `UNLOCKED`, `UNKNOWN`) that polls the service every few seconds.
 -   A **Last Updated** timestamp that shows how long ago the status was successfully retrieved, which counts up in real-time.
+
+<details>
+<summary><strong>► How to Access the Web UI from the Internet (Securely)</strong></summary>
+
+Exposing services directly to the internet by forwarding ports on your router is **highly discouraged** as it creates a significant security risk. A much safer method is to use a zero-config VPN service like [Tailscale](https://tailscale.com) or [NetBird](https://netbird.io).
+
+This guide uses Tailscale as an example. It creates a secure, private network between your devices, allowing you to access the bridge app's web server as if you were on the same local network, without opening any ports.
+
+1.  **Create a Tailscale Account**: Sign up for a free personal account on the [Tailscale website](https://login.tailscale.com/start).
+
+2.  **Install Tailscale on the Android Bridge Device**:
+    *   Open the Google Play Store on the dedicated Android device running the bridge app.
+    *   Search for and install the [Tailscale app](https://play.google.com/store/apps/details?id=com.tailscale.ipn).
+    *   Open the Tailscale app and log in with the account you created.
+    *   Activate the VPN connection when prompted.
+
+3.  **Install Tailscale on Your Client Device**:
+    *   Install the Tailscale app on the device you want to control the lock from (your primary phone, laptop, etc.). Download links are available on the [Tailscale downloads page](https://tailscale.com/download).
+    *   Log in to the **same** Tailscale account.
+
+4.  **Find the Bridge Device's Tailscale IP**:
+    *   On your client device, open the Tailscale app. You will see a list of all devices in your private network ("tailnet").
+    *   Find the Android bridge device in the list and note its IP address. It will likely start with `100.x.x.x`.
+
+5.  **Connect to the Web UI**:
+    *   Open a web browser on your client device.
+    *   Navigate to `http://<TAILSCALE_IP_ADDRESS>:<PORT>`, replacing `<TAILSCALE_IP_ADDRESS>` with the IP from the previous step and `<PORT>` with the port you configured in the bridge app's settings (e.g., `8080`).
+
+You can now securely control your lock from anywhere in the world. For more details on using Tailscale with other devices, see their documentation on how to [connect to devices in your tailnet](https://tailscale.com/kb/1452/connect-to-devices).
+
+</details>
 
 ## Troubleshooting
 
