@@ -184,7 +184,10 @@ class LockBridgeService : LifecycleService() {
     if (settings.isEnabled) {
       _webServerStatus.value = "Starting..."
       webServerManager?.stop()
-      webServerManager = WebServerManager { command ->
+      webServerManager = WebServerManager(
+        lockStatus = lockStatus,
+        lastStatusUpdateTime = lastStatusUpdateTime
+      ) { command ->
         triggerLockOperation(command)
       }.also {
         try {
