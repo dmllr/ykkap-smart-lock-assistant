@@ -1,0 +1,58 @@
+  # This workflow is triggered when a new tag is pushed to the repository.
+  # It is designed to automate the process of building a release APK and attaching it
+  # to a corresponding GitHub Release.
+  name: Create Android Release
+
+  on:
+    push:
+      tags:
+        - 'v*.*.*' # The workflow runs for tags matching the pattern vX.X.X, e.g., v1.0.0
+
+  permissions:
+    contents: write # This permission is required for the action to create a GitHub Release.
+
+  jobs:
+    build_and_release:
+      name: Build and Release APK
+      runs-on: ubuntu-latest # Use the latest stable Ubuntu runner for the job.
+
+      steps:
+        - name: Check out the repository
+          # This step checks out a copy of your repository for the workflow to access.
+          uses: actions/checkout@v4
+
+        - name: Set up JDK 17
+          # This step configures the Java environment required to build the Android application.
+          # Version 17 is specified as it is a common requirement for modern Android builds.
+          uses: actions/setup-java@v4
+          with:
+            java-version: '17'
+            distribution: 'temurin' # Use the Eclipse Temurin distribution of OpenJDK.
+            cache: 'gradle' # Cache Gradle dependencies to speed up subsequent builds.
+
+        - name: Set up Gradle
+          # This action optimizes the Gradle execution environment by caching dependencies
+          # and build outputs, leading to faster build times.
+          uses: gradle/actions/setup-gradle@v3
+
+        - name: Make gradlew executable
+          # On non-Windows runners, the Gradle wrapper script needs execute permissions.
+          # This command ensures the script can be run in the subsequent step.
+          run: chmod +x ./gradlew
+
+        - name: Build the release APK
+          # This command invokes the Gradle wrapper to assemble the release build of the application.
+          # The output is an unsigned APK file located in the build output directory.
+          run: ./gradlew :app:assembleRelease
+
+        - name: Create GitHub Release and Upload APK
+          # This action creates a new GitHub Release corresponding to the git tag. It then
+          # uploads the generated APK as an asset to that release, making it available
+          # for download. The GITHUB_TOKEN is automatically supplied by GitHub Actions.
+          uses: ncipollo/release-action@v1
+          with:
+            # A list of files to be uploaded as release assets.
+            # The path points to the standard output location for a release APK.
+            artifacts: "app/build/outputs/apk/release/app-release-unsigned.apk"
+            # The secret token is required for authentication with the GitHub API.
+            token: ${{ secrets.GITHUB_TOKEN }}
