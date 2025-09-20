@@ -355,7 +355,7 @@ class LockBridgeService : LifecycleService() {
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle("YKK Lock Bridge Active")
       .setContentText("Monitoring lock status via MQTT and Web")
-      .setSmallIcon(R.drawable.ic_launcher_foreground)
+      .setSmallIcon(R.mipmap.ic_launcher_foreground)
       .build()
   }
 }
