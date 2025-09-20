@@ -4,6 +4,10 @@
 [![Platform](https://img.shields.io/badge/platform-Android-brightgreen.svg)]()
 [![Kotlin](https://img.shields.io/badge/Kotlin-100%25-blueviolet.svg)]()
 
+[**日本語版READMEはこちら (Click here for Japanese README)**](README.ja.md)
+
+---
+
 An Android application that acts as a bridge, integrating your YKK AP smart lock with Home Assistant via MQTT and a local web server.
 
 This project provides a robust solution for controlling and monitoring your YKK AP "スマートコントロールキー" (Smart Control Key) electric lock, which lacks a public API for smart home integration. By leveraging Android's Accessibility Service, this app can programmatically interact with the official YKK AP application to lock, unlock, and read the status of your door.
