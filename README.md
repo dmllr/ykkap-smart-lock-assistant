@@ -8,13 +8,13 @@ An Android application that acts as a bridge, integrating your YKK AP smart lock
 
 This project provides a robust solution for controlling and monitoring your YKK AP "スマートコントロールキー" (Smart Control Key) electric lock, which lacks a public API for smart home integration. By leveraging Android's Accessibility Service, this app can programmatically interact with the official YKK AP application to lock, unlock, and read the status of your door.
 
-![screenshot of the main screen](img/readme-scr-main.png "Main Screen")
-![screenshot of the settings screen](img/readme-scr-settings.png "Settings Screen")
+![screenshot of the main screen](img/readme-scr-main.png "Main Screen") ![screenshot of the settings screen](img/readme-scr-settings.png "Settings Screen") ![screenshot of the web interface](img/readme-scr-webui.png "Web Interface")
 
 ## Features
 
 -   **Home Assistant Integration**: Full control and status monitoring through a highly reliable MQTT connection.
--   **Web UI Control**: A simple, local web interface for locking and unlocking, accessible from any device on your network.
+-   **Rich Web UI**: A dynamic, local web interface for locking/unlocking, viewing the live lock status, and seeing a "last updated" relative timestamp that updates in real-time. Accessible from any browser on your network.
+-   **JSON API Endpoint**: Includes a simple `/status` endpoint that returns the current lock state and last update timestamp in JSON format for custom integrations.
 -   **Real-time Status**: Publishes lock status (`LOCKED`, `UNLOCKED`, `UNAVAILABLE`) instantly to Home Assistant.
 -   **Robust and Reliable**:
     -   Runs as a persistent foreground service to prevent the OS from terminating it.
@@ -55,6 +55,7 @@ graph TD
         YKK -- UI Update --> AS
         AS -- Reports Status --> LBS
         LBS -- Publish Status --> MQTT_MGR
+        LBS -- Provide Status --> KTOR
     end
 
     subgraph Physical
@@ -91,8 +92,8 @@ graph TD
     *   **Battery Optimization Exemption**: Prevents the Android OS from putting the app to sleep to save power.
 3.  **Configure Integrations**:
     *   Navigate to **Settings** (top-right icon).
+    *   **Web Server**: Enable the web server for local network control. The port is configurable.
     *   **Home Assistant via MQTT**: Enable this integration and enter your MQTT broker's URL, port, and credentials (if applicable).
-    *   **Web Server**: Optionally, enable the web server for an alternative control method.
     *   Click **Save**.
 4.  **Start the Service**: Return to the main screen and tap **"Start Service"**. The status indicators for MQTT, Web Server, and the Door Lock should update.
 
@@ -165,7 +166,18 @@ graph TD
             {% endif %}
     ```
 
-2.  **Reload Home Assistant Configuration**: Reload your Home Assistant configuration (or simply restart Home Assistant instance) to apply the changes. A new "Smart Door Lock" device with its associated entities should now be available.
+2.  **Reload Home Assistant Configuration**: Reload your MQTT integration in Home Assistant (or restart the instance) to apply the changes. A new "Smart Door Lock" device with its associated entities should now be available.
+
+## Web Interface
+
+Once the service is running with the Web Server enabled, you can access the control panel from any browser on your local network.
+
+**URL**: `http://<your-android-device-ip>:<port>`
+
+The interface provides:
+-   **Lock** and **Unlock** buttons for direct control.
+-   A real-time **Status** display (`LOCKED`, `UNLOCKED`, `UNKNOWN`) that polls the service every few seconds.
+-   A **Last Updated** timestamp that shows how long ago the status was successfully retrieved, which counts up in real-time.
 
 ## Troubleshooting
 
@@ -175,7 +187,7 @@ graph TD
     -   The YKK app is showing a connection error.
     -   The phone screen is on, but the YKK app is not in the foreground.
     -   The YKK app has been updated with UI changes that are not yet supported by this bridge.
-    -   Use the "Update Door Lock Status" button in Home Assistant to trigger a fresh status check.
+    -   Use the "Update Door Lock Status" button in Home Assistant or refresh the status in the main app screen to trigger a fresh status check.
 
 ## Contributing
 

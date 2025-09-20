@@ -3,6 +3,7 @@ package com.ykkap.lockbridge.http
 import android.util.Log
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
@@ -15,21 +16,16 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
-import kotlinx.html.body
-import kotlinx.html.button
-import kotlinx.html.h1
-import kotlinx.html.head
-import kotlinx.html.meta
-import kotlinx.html.postForm
-import kotlinx.html.style
-import kotlinx.html.title
-import kotlinx.html.unsafe
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.html.*
 import java.util.concurrent.atomic.AtomicReference
 
 class WebServerManager(
+  private val lockStatus: Flow<String>,
+  private val lastStatusUpdateTime: Flow<Long?>,
   private val onCommand: (command: String) -> Unit
 ) {
-  // Use the specific type returned by embeddedServer to avoid casting issues.
   private val server = AtomicReference<EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>?>(null)
 
   companion object {
@@ -65,9 +61,13 @@ class WebServerManager(
               style {
                 unsafe {
                   +"""
-                    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f0f0f0; }
+                    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f0f0f0; text-align: center; }
                     h1 { color: #333; }
-                    button { font-size: 1.5rem; padding: 20px 40px; margin: 10px; border-radius: 8px; border: none; color: white; cursor: pointer; width: 200px; }
+                    .status-container { margin-bottom: 20px; font-size: 1.2rem; }
+                    #status { font-weight: bold; }
+                    #last-updated { color: #666; font-size: 0.9rem; }
+                    .button-container { display: flex; flex-direction: row; gap: 20px; }
+                    button { font-size: 1.5rem; padding: 20px 40px; border-radius: 8px; border: none; color: white; cursor: pointer; width: 150px; }
                     .lock { background-color: #d9534f; }
                     .unlock { background-color: #5cb85c; }
                   """.trimIndent()
@@ -76,14 +76,102 @@ class WebServerManager(
             }
             body {
               h1 { +"Door Lock Control" }
-              postForm(action = "/lock", encType = kotlinx.html.FormEncType.applicationXWwwFormUrlEncoded) {
-                button(type = kotlinx.html.ButtonType.submit, classes = "lock") { +"Lock" }
+              div(classes = "status-container") {
+                p {
+                  +"Status: "
+                  span { id = "status" }
+                }
+                p {
+                  +"Last Updated: "
+                  span { id = "last-updated" }
+                }
               }
-              postForm(action = "/unlock", encType = kotlinx.html.FormEncType.applicationXWwwFormUrlEncoded) {
-                button(type = kotlinx.html.ButtonType.submit, classes = "unlock") { +"Unlock" }
+              div(classes = "button-container") {
+                postForm(action = "/lock", encType = FormEncType.applicationXWwwFormUrlEncoded) {
+                  button(type = ButtonType.submit, classes = "lock") { +"Lock" }
+                }
+                postForm(action = "/unlock", encType = FormEncType.applicationXWwwFormUrlEncoded) {
+                  button(type = ButtonType.submit, classes = "unlock") { +"Unlock" }
+                }
+              }
+              script {
+                unsafe {
+                  +"""
+                    const statusEl = document.getElementById('status');
+                    const lastUpdatedEl = document.getElementById('last-updated');
+                    let lastUpdatedTimestamp = 0;
+                    let timeUpdateInterval;
+
+                    function updateRelativeTime() {
+                        if (lastUpdatedTimestamp === 0 || lastUpdatedTimestamp === null) {
+                            lastUpdatedEl.textContent = 'never';
+                            return;
+                        }
+                        const now = Date.now();
+                        const secondsAgo = Math.round((now - lastUpdatedTimestamp) / 1000);
+                        if (secondsAgo < 0) {
+                            lastUpdatedEl.textContent = 'just now';
+                        } else if (secondsAgo < 60) {
+                            lastUpdatedEl.textContent = `${"$"}{secondsAgo} second${"$"}{secondsAgo === 1 ? '' : 's'} ago`;
+                        } else {
+                            const minutes = Math.floor(secondsAgo / 60);
+                            lastUpdatedEl.textContent = `${"$"}{minutes} minute${"$"}{minutes === 1 ? '' : 's'} ago`;
+                        }
+                    }
+
+                    async function fetchStatus() {
+                        try {
+                            const response = await fetch('/status');
+                            if (!response.ok) {
+                                statusEl.textContent = 'Error';
+                                lastUpdatedEl.textContent = 'N/A';
+                                return;
+                            }
+                            const data = await response.json();
+
+                            statusEl.textContent = data.status;
+                            if (data.status === 'LOCKED') {
+                                statusEl.style.color = '#d9534f'; // Red
+                            } else if (data.status === 'UNLOCKED') {
+                                statusEl.style.color = '#5cb85c'; // Green
+                            } else {
+                                statusEl.style.color = '#f0ad4e'; // Orange
+                            }
+
+                            if (data.lastUpdated !== lastUpdatedTimestamp) {
+                                lastUpdatedTimestamp = data.lastUpdated;
+                                if (timeUpdateInterval) clearInterval(timeUpdateInterval);
+                                
+                                if (lastUpdatedTimestamp) {
+                                    updateRelativeTime();
+                                    timeUpdateInterval = setInterval(updateRelativeTime, 1000);
+                                } else {
+                                   lastUpdatedEl.textContent = 'never';
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Failed to fetch status:', error);
+                            statusEl.textContent = 'Offline';
+                        }
+                    }
+
+                    document.addEventListener('DOMContentLoaded', () => {
+                        fetchStatus();
+                        setInterval(fetchStatus, 5000);
+                    });
+                  """.trimIndent()
+                }
               }
             }
           }
+        }
+        get("/status") {
+          val status = lockStatus.first()
+          val timestamp = lastStatusUpdateTime.first()
+          // Ktor doesn't have a built-in JSON DSL without extra plugins,
+          // so we construct a simple JSON string manually.
+          val jsonResponse = """{"status": "$status", "lastUpdated": $timestamp}"""
+          call.respondText(jsonResponse, ContentType.Application.Json)
         }
         post("/lock") {
           Log.i(TAG, "Received /lock command from web.")
@@ -103,7 +191,6 @@ class WebServerManager(
   }
 
   fun stop() {
-    // This works because EmbeddedServer implements the ApplicationEngine interface, which has the stop() method.
     server.getAndSet(null)?.stop(1000, 2000)
     Log.i(TAG, "Web server stopped.")
   }
