@@ -15,24 +15,40 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-// These are the Japanese strings on the buttons in the YKK app.
-@Suppress("unused")
-private const val YKK_UNLOCK_TEXT = "解錠"
+// --- UI Text Constants ---
+private const val YKK_PACKAGE_NAME = "com.alpha.lockapp"
 @Suppress("unused")
 private const val YKK_LOCK_TEXT = "施錠"
-private const val YKK_WAKE_UP_TEXT = "スリープモード解除"
-
-// This is the text present in the green "locked" status view.
+@Suppress("unused")
+private const val YKK_UNLOCK_TEXT = "解錠"
+private const val YKK_WAKE_UP_BUTTON_DESC = "スリープモード解除"
 private const val YKK_LOCKED_STATUS_TEXT = "施錠されています"
-
-// This is the text present in the red "unlocked" status view.
 private const val YKK_UNLOCKED_STATUS_TEXT = "解錠されています"
 private const val YKK_CONNECTION_ERROR_TEXT = "ドアと接続できません"
-private const val YKK_SLEEP_MODE_STATUS_TEXT = "スリープモード"
-private const val YKK_PACKAGE_NAME = "com.alpha.lockapp"
+private const val YKK_SLEEP_MODE_HEADER_SUFFIX = "スリープモード"
 
+/**
+ * Defines the high-level states of the YKK AP application's user interface.
+ * This allows for a clean, state-machine-driven approach to UI interaction.
+ */
+private sealed class DoorState {
+  /** The door is responsive and ready to accept lock/unlock commands. */
+  object Available : DoorState()
+
+  /** The app is in power-saving mode and must be woken up. */
+  object Sleep : DoorState()
+
+  /** The app cannot communicate with the door's Bluetooth module. */
+  object Disconnected : DoorState()
+
+  /** The UI is in a transitional or unrecognized state. */
+  object Unknown : DoorState()
+}
 
 enum class YkkAction {
   LOCK, UNLOCK, CHECK_STATUS, DUMP_VIEW_HIERARCHY
@@ -47,11 +63,13 @@ class YkkAccessibilityService : AccessibilityService() {
 
   companion object {
     private const val TAG = "YkkAccessibilityService"
-    private const val MAX_WAIT_TIME_MS = 15000L
+    private const val MAX_WAIT_TIME_MS = 20000L // 20 seconds
     private const val RETRY_INTERVAL_MS = 500L
-    private const val WAKELOCK_TIMEOUT_MS = 20000L // 20 seconds
+    private const val WAKELOCK_TIMEOUT_MS = 30000L // 30 seconds
+    private const val POST_CLICK_CONFIRMATION_TIMEOUT_MS = 8000L // 8 seconds to wait for UI to update after a click
 
     private var instance: YkkAccessibilityService? = null
+    private val actionMutex = Mutex()
 
     suspend fun executeAction(action: YkkAction): Boolean {
       val service = instance
@@ -82,142 +100,249 @@ class YkkAccessibilityService : AccessibilityService() {
       packageNames = arrayOf(YKK_PACKAGE_NAME)
       feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
     }
+    Log.i(TAG, "Accessibility Service connected.")
   }
 
   private suspend fun performActionInternal(action: YkkAction): Boolean {
-    val wakeLock = powerManager.newWakeLock(
-      PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-      "YkkAccessibilityService::ActionWakeLock"
-    )
+    return actionMutex.withLock {
+      if (powerManager.isInteractive) {
+        val currentNode = rootInActiveWindow
+        if (currentNode?.packageName == YKK_PACKAGE_NAME && determineDoorState(currentNode) is DoorState.Available) {
+          Log.i(TAG, "Fast path: Device is interactive and app is available. Executing '$action' immediately.")
+          updateStatusFromNode(currentNode)
 
-    try {
-      wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
-      Log.d(TAG, "Bright screen wakelock acquired.")
+          if (action == YkkAction.CHECK_STATUS) return@withLock true
 
-      // Always launch the UnlockAndLaunchActivity. It is the designated component for
-      // waking the screen and ensuring the target app is in the foreground. This avoids
-      // edge cases where the screen is off but the system still considers the app "active".
-      val launchIntent = Intent(this, UnlockAndLaunchActivity::class.java).apply {
+          if (action == YkkAction.LOCK || action == YkkAction.UNLOCK) {
+            val buttons = findActionableLockUnlockButtons(currentNode)
+            val targetButton = if (action == YkkAction.LOCK) buttons.getOrNull(0) else buttons.getOrNull(1)
+            if (targetButton != null) {
+              targetButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+              return@withLock waitForStateChange(action)
+            } else {
+              Log.e(TAG, "Fast path failed: Could not find button for action '$action'.")
+              // Fall through to the full launch sequence.
+            }
+          }
+        }
+      } else {
+        Log.i(TAG, "Fast path skipped: Device is not interactive.")
+      }
+
+      val wakeLock = powerManager.newWakeLock(
+        PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+        "YkkAccessibilityService::ActionWakeLock"
+      )
+      try {
+        wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
+        Log.d(TAG, "Full path: Bright screen wakelock acquired for action: $action")
+
+        withContext(Dispatchers.IO) {
+          launchApp()
+
+          if (action == YkkAction.DUMP_VIEW_HIERARCHY) {
+            delay(1000)
+            Log.i(TAG, "Executing view hierarchy dump as requested.")
+            dumpNodeHierarchy(rootInActiveWindow)
+            return@withContext true
+          }
+
+          val success = withTimeoutOrNull(MAX_WAIT_TIME_MS) {
+            while (true) {
+              val updatedNode = rootInActiveWindow
+              when (determineDoorState(updatedNode)) {
+                is DoorState.Disconnected -> {
+                  Log.e(TAG, "Door is disconnected. Aborting operation.")
+                  LockBridgeService.updateLockStatus("UNAVAILABLE")
+                  return@withTimeoutOrNull false
+                }
+                is DoorState.Sleep -> {
+                  Log.i(TAG, "Door is in sleep mode. Attempting to wake up.")
+                  val wakeUpButton = findClickableNodeByDescription(updatedNode, YKK_WAKE_UP_BUTTON_DESC)
+                  if (wakeUpButton != null) {
+                    wakeUpButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                  } else {
+                    Log.e(TAG, "Could not find the 'Wake Up' button. Aborting.")
+                    return@withTimeoutOrNull false
+                  }
+                }
+                is DoorState.Available -> {
+                  Log.i(TAG, "Door is available and ready for action.")
+                  updateStatusFromNode(updatedNode)
+
+                  if (action == YkkAction.CHECK_STATUS) return@withTimeoutOrNull true
+
+                  val buttons = findActionableLockUnlockButtons(updatedNode)
+                  val targetButton = if (action == YkkAction.LOCK) buttons.getOrNull(0) else buttons.getOrNull(1)
+
+                  if (targetButton != null) {
+                    targetButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    return@withTimeoutOrNull waitForStateChange(action)
+                  } else {
+                    Log.e(TAG, "Could not find button for action '$action'.")
+                    return@withTimeoutOrNull false
+                  }
+                }
+                is DoorState.Unknown -> {
+                  Log.v(TAG, "Door state is UNKNOWN. Waiting for a stable state...")
+                }
+              }
+              delay(RETRY_INTERVAL_MS)
+            }
+            false
+          }
+
+          if (success == null) {
+            Log.e(TAG, "Operation timed out after $MAX_WAIT_TIME_MS ms.")
+            LockBridgeService.updateLockStatus("UNAVAILABLE")
+          }
+          return@withContext success ?: false
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "An unexpected exception occurred during performActionInternal.", e)
+        return@withLock false
+      } finally {
+        if (wakeLock.isHeld) {
+          wakeLock.release()
+          Log.d(TAG, "Bright screen wakelock released.")
+        }
+      }
+    }
+  }
+
+  private suspend fun waitForStateChange(action: YkkAction): Boolean {
+    val expectedText = when (action) {
+      YkkAction.LOCK -> YKK_LOCKED_STATUS_TEXT
+      YkkAction.UNLOCK -> YKK_UNLOCKED_STATUS_TEXT
+      else -> return true
+    }
+    Log.d(TAG, "Waiting for UI to update with text: '$expectedText'")
+    val success = withTimeoutOrNull(POST_CLICK_CONFIRMATION_TIMEOUT_MS) {
+      while (true) {
+        val node = rootInActiveWindow
+        if (node != null && findNodeByText(node, expectedText) != null) {
+          Log.i(TAG, "UI update confirmed for action $action.")
+          updateStatusFromNode(node)
+          return@withTimeoutOrNull true
+        }
+        delay(RETRY_INTERVAL_MS)
+      }
+      false
+    }
+    return success ?: false
+  }
+
+  private suspend fun launchApp() {
+    withContext(Dispatchers.Main) {
+      val launchIntent = Intent(this@YkkAccessibilityService, UnlockAndLaunchActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
       startActivity(launchIntent)
-
-      val rootNode = withTimeoutOrNull(MAX_WAIT_TIME_MS) {
-        var node: AccessibilityNodeInfo?
-        while (true) {
-          node = rootInActiveWindow
-          if (node != null && node.packageName == YKK_PACKAGE_NAME) break
-          delay(RETRY_INTERVAL_MS)
-        }
-        node
-      }
-
-      if (rootNode == null) {
-        Log.e(TAG, "Timed out waiting for '$YKK_PACKAGE_NAME' window.")
-        LockBridgeService.updateLockStatus("UNAVAILABLE")
-        return false
-      }
-
-      if (findNodeByText(rootNode, YKK_CONNECTION_ERROR_TEXT) != null) {
-        Log.w(TAG, "Connection error detected on initial screen. Aborting action.")
-        LockBridgeService.updateLockStatus("UNAVAILABLE")
-        return false
-      }
-
-      if (action == YkkAction.DUMP_VIEW_HIERARCHY) {
-        dumpNodeHierarchy(rootNode)
-        return true
-      }
-
-      // --- Unified Wake-Up and Readiness Logic ---
-
-      val isSleepMode = findNodeByText(rootNode, YKK_SLEEP_MODE_STATUS_TEXT) != null
-      if (isSleepMode) {
-        Log.i(TAG, "Sleep mode status text detected. Attempting to wake up.")
-        val wakeUpButton = findClickableNodeByText(rootNode, YKK_WAKE_UP_TEXT)
-        if (wakeUpButton != null) {
-          wakeUpButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-          delay(500)
-        } else {
-          Log.e(TAG, "Sleep mode detected, but the 'Wake Up' button could not be found. Aborting.")
-          return false
-        }
-      }
-
-      val readyRootNode = withTimeoutOrNull(MAX_WAIT_TIME_MS) {
-        var currentNode: AccessibilityNodeInfo?
-        var isReady = false
-        while (true) {
-          currentNode = rootInActiveWindow
-          if (findNodeByText(currentNode, YKK_CONNECTION_ERROR_TEXT) != null) {
-            Log.w(TAG, "Connection error detected while waiting for buttons. Aborting.")
-            LockBridgeService.updateLockStatus("UNAVAILABLE")
-            break
-          }
-
-          val sleepModeNode = findNodeByText(currentNode, YKK_SLEEP_MODE_STATUS_TEXT)
-          val buttons = findActionableLockUnlockButtons(currentNode)
-
-          if (sleepModeNode == null && buttons.size >= 2) {
-            Log.i(TAG, "Sleep mode text is gone and Lock/Unlock buttons are now active. App is ready.")
-            isReady = true
-            break
-          }
-
-          delay(RETRY_INTERVAL_MS)
-        }
-        if (isReady) rootInActiveWindow else null
-      }
-
-
-      if (readyRootNode == null) {
-        Log.e(TAG, "Timed out or connection error occurred while waiting for lock/unlock buttons to become active.")
-        return false
-      }
-
-      // --- Action-Specific Logic ---
-
-      if (action == YkkAction.CHECK_STATUS) {
-        Log.i(TAG, "App is awake. Proactively checking status from the ready UI.")
-        checkStatus(readyRootNode)
-        return true
-      }
-
-      val finalButtons = findActionableLockUnlockButtons(readyRootNode)
-      val targetNode = when (action) {
-        YkkAction.LOCK -> finalButtons.getOrNull(0)
-        YkkAction.UNLOCK -> finalButtons.getOrNull(1)
-        else -> null
-      }
-
-      return if (targetNode != null) {
-        Log.d(TAG, "Found target button for action $action. Performing click.")
-        targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-      } else {
-        Log.w(TAG, "Could not find a target button for action: $action.")
-        false
-      }
-    } finally {
-      if (wakeLock.isHeld) {
-        wakeLock.release()
-        Log.d(TAG, "Bright screen wakelock released.")
+    }
+    withTimeoutOrNull(5000L) {
+      while (rootInActiveWindow?.packageName != YKK_PACKAGE_NAME) {
+        delay(200)
       }
     }
+  }
+
+  private fun determineDoorState(rootNode: AccessibilityNodeInfo?): DoorState {
+    if (rootNode == null) return DoorState.Unknown
+    if (findNodeByText(rootNode, YKK_CONNECTION_ERROR_TEXT) != null) return DoorState.Disconnected
+    if (findNodeByDescription(rootNode, YKK_SLEEP_MODE_HEADER_SUFFIX, MatchType.ENDS_WITH) != null) return DoorState.Sleep
+    if (findNodeByText(rootNode, YKK_LOCKED_STATUS_TEXT) != null || findNodeByText(rootNode, YKK_UNLOCKED_STATUS_TEXT) != null) return DoorState.Available
+    return DoorState.Unknown
+  }
+
+  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+    if (event?.packageName != YKK_PACKAGE_NAME) return
+    serviceScope.launch(Dispatchers.Default) {
+      rootInActiveWindow?.let { updateStatusFromNode(it) }
+    }
+  }
+
+  private fun updateStatusFromNode(rootNode: AccessibilityNodeInfo) {
+    try {
+      when (determineDoorState(rootNode)) {
+        is DoorState.Available -> {
+          val isLocked = findNodeByText(rootNode, YKK_LOCKED_STATUS_TEXT) != null
+          val status = if (isLocked) "LOCKED" else "UNLOCKED"
+          LockBridgeService.updateLockStatus(status)
+        }
+        is DoorState.Disconnected -> LockBridgeService.updateLockStatus("UNAVAILABLE")
+        is DoorState.Sleep, is DoorState.Unknown -> LockBridgeService.updateLockStatus("UNKNOWN")
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Error during status update from node.", e)
+      LockBridgeService.updateLockStatus("UNKNOWN")
+    }
+  }
+
+  // region Node Search Helpers
+
+  private enum class MatchType {
+    EXACT, CONTAINS, ENDS_WITH
   }
 
   private fun findActionableLockUnlockButtons(rootNode: AccessibilityNodeInfo?): List<AccessibilityNodeInfo> {
     val buttons = mutableListOf<AccessibilityNodeInfo>()
-    fun findNodes(node: AccessibilityNodeInfo?) {
-      node ?: return
+    if (rootNode == null) return buttons
+
+    fun findNodes(node: AccessibilityNodeInfo) {
       if (node.className == "android.view.ViewGroup" && node.isClickable && node.contentDescription.isNullOrEmpty()) {
         buttons.add(node)
       }
       for (i in 0 until node.childCount) {
-        findNodes(node.getChild(i))
+        node.getChild(i)?.let { findNodes(it) }
       }
     }
-    rootNode?.let { findNodes(it) }
+    val scrollView = findNodeByClassName(rootNode, "android.widget.ScrollView")
+    scrollView?.let { findNodes(it) }
     return buttons
+  }
+
+  private fun findNodeByClassName(rootNode: AccessibilityNodeInfo, className: String): AccessibilityNodeInfo? {
+    if (rootNode.className == className) return rootNode
+    for (i in 0 until rootNode.childCount) {
+      val child = rootNode.getChild(i)
+      val result = child?.let { findNodeByClassName(it, className) }
+      if (result != null) return result
+    }
+    return null
+  }
+
+  private fun findNodeByText(rootNode: AccessibilityNodeInfo?, text: String): AccessibilityNodeInfo? {
+    rootNode ?: return null
+    val nodes = rootNode.findAccessibilityNodeInfosByText(text)
+    return nodes.firstOrNull { it.text?.toString() == text }
+  }
+
+  private fun findNodeByDescription(rootNode: AccessibilityNodeInfo?, text: String, matchType: MatchType = MatchType.EXACT): AccessibilityNodeInfo? {
+    rootNode ?: return null
+
+    fun search(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+      val desc = node.contentDescription
+      if (desc != null) {
+        val isMatch = when (matchType) {
+          MatchType.EXACT -> desc == text
+          MatchType.CONTAINS -> desc.contains(text)
+          MatchType.ENDS_WITH -> desc.endsWith(text)
+        }
+        if (isMatch) return node
+      }
+      for (i in 0 until node.childCount) {
+        val child = node.getChild(i)
+        val result = child?.let { search(it) }
+        if (result != null) return result
+      }
+      return null
+    }
+    return search(rootNode)
+  }
+
+  private fun findClickableNodeByDescription(rootNode: AccessibilityNodeInfo?, text: String): AccessibilityNodeInfo? {
+    val descNode = findNodeByDescription(rootNode, text) ?: return null
+    return generateSequence(descNode) { it.parent }.firstOrNull { it.isClickable }
   }
 
   private fun dumpNodeHierarchy(node: AccessibilityNodeInfo?, depth: Int = 0) {
@@ -232,57 +357,16 @@ class YkkAccessibilityService : AccessibilityService() {
     }
   }
 
-  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-    if (event?.packageName != YKK_PACKAGE_NAME) return
-    rootInActiveWindow?.let { checkStatus(it) }
-  }
-
-  private fun checkStatus(rootNode: AccessibilityNodeInfo) {
-    val isUnavailable = findNodeByText(rootNode, YKK_CONNECTION_ERROR_TEXT) != null
-    if (isUnavailable) {
-      LockBridgeService.updateLockStatus("UNAVAILABLE")
-      return
-    }
-
-    val isLocked = findNodeByText(rootNode, YKK_LOCKED_STATUS_TEXT) != null
-    val isUnlocked = findNodeByText(rootNode, YKK_UNLOCKED_STATUS_TEXT) != null
-
-    val status = when {
-      isLocked -> "LOCKED"
-      isUnlocked -> "UNLOCKED"
-      else -> "UNKNOWN"
-    }
-    if (status != "UNKNOWN") {
-      LockBridgeService.updateLockStatus(status)
-    }
-  }
-
-  @Suppress("SameParameterValue")
-  private fun findClickableNodeByText(rootNode: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
-    val textNode = findNodeByText(rootNode, text) ?: return null
-    var currentNode: AccessibilityNodeInfo? = textNode
-    while (currentNode != null) {
-      if (currentNode.isClickable) {
-        return currentNode
-      }
-      currentNode = currentNode.parent
-    }
-    return if (textNode.isClickable) textNode else null
-  }
-
-  private fun findNodeByText(rootNode: AccessibilityNodeInfo?, text: String): AccessibilityNodeInfo? {
-    rootNode ?: return null
-    val nodes = rootNode.findAccessibilityNodeInfosByText(text)
-    return nodes.firstOrNull { it.text?.toString() == text || it.contentDescription?.toString() == text }
-  }
+  // endregion
 
   override fun onInterrupt() {
-    // Not implemented
+    Log.w(TAG, "Accessibility Service interrupted.")
   }
 
   override fun onDestroy() {
     super.onDestroy()
     instance = null
     serviceJob.cancel()
+    Log.i(TAG, "Accessibility Service destroyed.")
   }
 }

@@ -239,7 +239,7 @@ class LockBridgeService : LifecycleService() {
             _desiredLockState.value = null
             return@collect
           } else {
-            Log.w(TAG, "Attempt $attempt: State change confirmation timed out.")
+            Log.w(TAG, "Attempt $attempt: State change confirmation timed out after successful click.")
           }
         } else {
           Log.w(TAG, "Attempt $attempt: The click action itself failed or timed out.")
