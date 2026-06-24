@@ -1,17 +1,16 @@
 plugins {
   id("com.android.application")
-  id("org.jetbrains.kotlin.android")
-  alias(libs.plugins.compose.compiler)
+  id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
   namespace = "com.ykkap.lockbridge"
-  compileSdk = 36
+  compileSdk = 37
 
   defaultConfig {
     applicationId = "com.ykkap.lockbridge"
     minSdk = 26
-    targetSdk = 36
+    targetSdk = 37
     versionCode = 1
     versionName = "1.0"
 
@@ -33,9 +32,6 @@ android {
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_1_8
     targetCompatibility = JavaVersion.VERSION_1_8
-  }
-  kotlinOptions {
-    jvmTarget = "1.8"
   }
   buildFeatures {
     compose = true
