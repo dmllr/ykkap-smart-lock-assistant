@@ -25,7 +25,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -37,15 +36,12 @@ class LockBridgeService : LifecycleService() {
 
   private lateinit var settingsRepository: SettingsRepository
   private var wakeLock: PowerManager.WakeLock? = null
-  private var supervisorJob: Job? = null
   private var statusCheckerJob: Job? = null
 
   companion object {
     private const val TAG = "LockBridgeService"
     private const val NOTIFICATION_ID = 1
     private const val CHANNEL_ID = "LockBridgeServiceChannel"
-    private const val OPERATION_RETRY_LIMIT = 3
-    private const val OPERATION_TIMEOUT_MS = 10000L // 10 seconds to wait for state change
     private const val STATUS_CHECK_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
 
     private val _serviceState = MutableStateFlow(ServiceState.STOPPED)
@@ -67,7 +63,6 @@ class LockBridgeService : LifecycleService() {
     private val _lastStatusUpdateTime = MutableStateFlow<Long?>(null)
     val lastStatusUpdateTime: StateFlow<Long?> = _lastStatusUpdateTime.asStateFlow()
 
-    private val _desiredLockState = MutableStateFlow<String?>(null)
     private val manualUpdateRequest = MutableSharedFlow<Unit>(
       extraBufferCapacity = 1,
       onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -109,8 +104,6 @@ class LockBridgeService : LifecycleService() {
     super.onStartCommand(intent, flags, startId)
     startForeground(NOTIFICATION_ID, createNotification())
 
-    _desiredLockState.value = null
-
     lifecycleScope.launch {
       settingsRepository.settingsFlow.distinctUntilChanged().collect { settings ->
         handleSettingsUpdate(settings)
@@ -149,12 +142,6 @@ class LockBridgeService : LifecycleService() {
         Log.i(TAG, "Manual status update requested from UI.")
         YkkAccessibilityService.requestStatusCheck()
       }
-    }
-
-    // Cancel and restart jobs to ensure they are always running when the service is.
-    supervisorJob?.cancel()
-    supervisorJob = lifecycleScope.launch {
-      startOperationSupervisor()
     }
 
     statusCheckerJob?.cancel()
@@ -205,56 +192,6 @@ class LockBridgeService : LifecycleService() {
     }
   }
 
-  private suspend fun startOperationSupervisor() {
-    _desiredLockState.collect { desiredState ->
-      if (desiredState == null) return@collect
-
-      for (attempt in 1..OPERATION_RETRY_LIMIT) {
-        if (lockStatus.first().equals(desiredState, ignoreCase = true)) {
-          Log.i(TAG, "Operation successful. Desired state '$desiredState' matches actual state.")
-          _desiredLockState.value = null
-          return@collect
-        }
-
-        Log.i(
-          TAG,
-          "Attempt $attempt/$OPERATION_RETRY_LIMIT: State mismatch. Desired: '$desiredState', Actual: '${lockStatus.first()}'."
-        )
-
-        val action = if (desiredState == "LOCKED") YkkAction.LOCK else YkkAction.UNLOCK
-
-        // 1. Await the result of the click action itself.
-        val clickSuccess = YkkAccessibilityService.executeAction(action)
-
-        // 2. Only if the click was successful, wait for the state to change.
-        if (clickSuccess) {
-          Log.i(TAG, "Click action for '$desiredState' performed successfully. Waiting for state confirmation.")
-          val success = withTimeoutOrNull(OPERATION_TIMEOUT_MS) {
-            lockStatus.first { it.equals(desiredState, ignoreCase = true) }
-            true
-          }
-
-          if (success == true) {
-            Log.i(TAG, "State successfully changed to '$desiredState' on attempt $attempt.")
-            _desiredLockState.value = null
-            return@collect
-          } else {
-            Log.w(TAG, "Attempt $attempt: State change confirmation timed out after successful click.")
-          }
-        } else {
-          Log.w(TAG, "Attempt $attempt: The click action itself failed or timed out.")
-        }
-
-        delay(2000) // Wait before the next full attempt.
-      }
-
-      Log.e(TAG, "Operation failed after $OPERATION_RETRY_LIMIT attempts. Could not set state to '$desiredState'.")
-      // Report that the lock is unavailable since the operation failed.
-      updateLockStatus("UNAVAILABLE")
-      _desiredLockState.value = null
-    }
-  }
-
   private suspend fun startPeriodicStatusChecker() {
     // Perform an initial check shortly after the service starts.
     delay(10000) // Wait 10 seconds before the first check.
@@ -262,7 +199,7 @@ class LockBridgeService : LifecycleService() {
       Log.i(TAG, "Performing periodic status check...")
       // We only want to check the status, not perform a lock/unlock action.
       // This wakes the app from sleep and triggers the AccessibilityEvent listener.
-      YkkAccessibilityService.requestStatusCheck()
+      YkkAccessibilityService.executeAction(YkkAction.CHECK_STATUS)
       delay(STATUS_CHECK_INTERVAL_MS)
     }
   }
@@ -315,16 +252,16 @@ class LockBridgeService : LifecycleService() {
   }
 
   private fun triggerLockOperation(command: String) {
-    when (command) {
-      "LOCK" -> _desiredLockState.value = "LOCKED"
-      "UNLOCK" -> _desiredLockState.value = "UNLOCKED"
+    val action = when (command) {
+      "LOCK" -> YkkAction.LOCK
+      "UNLOCK" -> YkkAction.UNLOCK
+      else -> return
     }
+    YkkAccessibilityService.executeAction(action)
   }
 
   override fun onDestroy() {
     super.onDestroy()
-    // Cancel all running coroutines when the service is destroyed.
-    supervisorJob?.cancel()
     statusCheckerJob?.cancel()
 
     if (::mqttManager.isInitialized) {
